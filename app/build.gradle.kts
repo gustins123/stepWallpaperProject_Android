@@ -101,4 +101,7 @@ dependencies {
 
     // Optional: OkHttp Logging Interceptor (for debugging network calls)
     implementation("com.squareup.okhttp3:logging-interceptor:4.11.0") // Use the latest version
+
+    // Coil for image loading in Compose
+    implementation("io.coil-kt:coil-compose:2.6.0") // Use the latest version of Coil
 }

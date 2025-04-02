@@ -15,7 +15,7 @@ interface UnsplashApiService {
     @GET("photos/random") // Endpoint path
     suspend fun getRandomPhoto(
         // Optional query parameters (can add orientation, query term, etc.)
-        @Query("orientation") orientation: String = "portrait" // Example: fetch landscape photos
-        // @Query("query") searchTerm: String? = null // Example: search for specific themes
+        //@Query("topics") topics: String = "wallpapers", // Example: fetch landscape photos
+        @Query("query") searchTerm: String? = "wallpaper" // Example: search for specific themes
     ): Response<UnsplashPhoto> // Return Response wrapper around your data model
 }
