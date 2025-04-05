@@ -34,6 +34,7 @@ import com.example.stepwallpaperprojectfinal.network.RetrofitInstance // Import 
 import kotlinx.coroutines.launch // Import coroutine launch builder
 import java.io.IOException // For exception handling
 import android.app.WallpaperManager
+import android.graphics.Bitmap
 import android.graphics.drawable.BitmapDrawable
 import android.widget.Toast // Simple feedback for now, Snackbar is better
 import androidx.compose.material3.Divider
@@ -53,6 +54,7 @@ import android.hardware.Sensor // Import Sensor
 import android.hardware.SensorEvent // Import SensorEvent
 import android.hardware.SensorEventListener // Import SensorEventListener
 import android.hardware.SensorManager // Import SensorManager
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.DisposableEffect // Import DisposableEffect
@@ -61,6 +63,13 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController // To hide keyboard
+import androidx.compose.material3.Slider // Import Slider
+import androidx.compose.ui.graphics.asImageBitmap // To display Bitmap in Compose
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.foundation.Image // Import Image composable
+import androidx.compose.foundation.border
+import androidx.core.graphics.drawable.toBitmap // To convert drawable to bitmap
+import com.example.stepwallpaperprojectfinal.image.ImageProcessor // Import your processor
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -313,6 +322,47 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
             }
         }
     }
+    // --- Image Processor Test State ---
+    var sliderProgress by remember { mutableStateOf(0.5f) } // Initial progress for slider
+    val fixedSeedForTesting = 0L // Use a constant seed for consistent testing
+
+    // Load the sample image drawable and convert to Bitmap (only once or when context changes)
+    // Use remember with the resource ID to avoid reloading repeatedly
+    val sourceBitmapForTest = remember(R.drawable.sample_image) {
+        ContextCompat.getDrawable(context, R.drawable.sample_image)?.toBitmap()
+    }
+
+    // State to hold the generated bitmap for display
+    // Use derivedStateOf to recalculate only when progress or source bitmap changes
+    // Note: This can still be costly. A button trigger might be smoother.
+    val revealedBitmapState = remember { mutableStateOf<Bitmap?>(null) }
+
+    // Effect to regenerate the bitmap when progress or source changes
+    // This isolates the generation from direct slider callback for potential future debouncing etc.
+    LaunchedEffect(sliderProgress, sourceBitmapForTest, fixedSeedForTesting) {
+        println("ImageProcessorTest: LaunchedEffect triggered. Progress: $sliderProgress, Source Valid: ${sourceBitmapForTest != null}") // Log effect trigger
+        if (sourceBitmapForTest != null) {
+            // Consider Dispatchers.Default for CPU-bound work like bitmap generation
+            withContext(Dispatchers.Default) {
+                println("ImageProcessorTest: Generating bitmap on Default dispatcher...")
+                val newBitmap = ImageProcessor.generateRevealedBitmap(
+                    sourceBitmapForTest,
+                    sliderProgress,
+                    fixedSeedForTesting
+                )
+                println("ImageProcessorTest: Bitmap generation finished. Result null? ${newBitmap == null}, Hash: ${newBitmap?.hashCode()}") // Log result
+                withContext(Dispatchers.Main) { // Update state back on Main thread
+                    // Recycle previous bitmap manually IF needed (Compose might handle ImageBitmap state)
+                    // revealedBitmapState.value?.recycle() // Be careful with this - might cause issues if Compose still uses it
+                    println("ImageProcessorTest: Updating revealedBitmapState on Main thread.")
+                    revealedBitmapState.value = newBitmap
+                }
+            }
+        } else {
+            println("ImageProcessorTest: Source bitmap is null, skipping generation.")
+            revealedBitmapState.value = null // Clear if source is null
+        }
+    }
 
     // --- UI using Scaffold for Snackbar ---
     Scaffold(
@@ -432,6 +482,48 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
                     color = MaterialTheme.colorScheme.error
                 )
             }
+            Spacer(modifier = Modifier.height(16.dp)) // Add space at the bottom
+
+
+            // --- Image Processor Test Section ---
+            Text("4. Reveal Logic Test:", style = MaterialTheme.typography.titleMedium)
+            Spacer(modifier = Modifier.height(8.dp))
+
+            if (sourceBitmapForTest == null) {
+                Text("Error: Could not load sample_image.png from drawables.", color = MaterialTheme.colorScheme.error)
+            } else {
+                Text("Adjust progress to see reveal effect:")
+                Slider(
+                    value = sliderProgress,
+                    onValueChange = { newValue -> sliderProgress = newValue }, // Update state on change
+                    valueRange = 0f..1f, // Progress from 0% to 100%
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(String.format("Progress: %.0f%%", sliderProgress * 100)) // Display percentage
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Display the generated bitmap
+                val imageBitmapToShow = revealedBitmapState.value?.asImageBitmap() // Convert to ImageBitmap for Compose
+
+                if (imageBitmapToShow != null) {
+                    Image(
+                        bitmap = imageBitmapToShow,
+                        contentDescription = "Revealed Image Preview",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            // Maintain aspect ratio - adjust size as needed
+                            .aspectRatio(sourceBitmapForTest.width.toFloat() / sourceBitmapForTest.height.toFloat())
+                            .border(BorderStroke(1.dp, Color.Gray)), // Add border to see edges
+                        contentScale = ContentScale.Fit // Fit within bounds
+                    )
+                } else {
+                    // Show a placeholder or loading indicator if bitmap is being generated
+                    Text("Generating preview...") // Or use CircularProgressIndicator
+                }
+            }
+
+
             Spacer(modifier = Modifier.height(16.dp)) // Add space at the bottom
         }
     } // End Scaffold
