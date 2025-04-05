@@ -49,6 +49,18 @@ import coil.request.ErrorResult
 import coil.request.SuccessResult
 import kotlinx.coroutines.Dispatchers // Import Dispatchers
 import kotlinx.coroutines.withContext // Import withContext
+import android.hardware.Sensor // Import Sensor
+import android.hardware.SensorEvent // Import SensorEvent
+import android.hardware.SensorEventListener // Import SensorEventListener
+import android.hardware.SensorManager // Import SensorManager
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.DisposableEffect // Import DisposableEffect
+import androidx.compose.material3.OutlinedTextField // Import TextField
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController // To hide keyboard
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -88,6 +100,7 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope() // Scope for launching coroutines
     val lifecycleOwner = LocalLifecycleOwner.current // For observing lifecycle state
+    val keyboardController = LocalSoftwareKeyboardController.current // Get keyboard controller
 
     // --- Permissions Handling ---
     // Define permissions needed at runtime based on Android version
@@ -129,8 +142,9 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
 
     // --- API Fetching State ---
     var imageUrl by rememberSaveable { mutableStateOf<String?>(null) } // Holds the fetched URL
-    var isLoading by remember { mutableStateOf(false) }
-    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var isFetchingImage by remember { mutableStateOf(false) }
+    var fetchErrorMessage by remember { mutableStateOf<String?>(null) }
+    var searchQuery by rememberSaveable { mutableStateOf("") }
 
     // --- Wallpaper Setting State ---
     var isSettingWallpaper by remember { mutableStateOf(false) }
@@ -148,13 +162,20 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
 
     // --- API Fetch Function ---
     fun fetchRandomImage() {
-        isLoading = true
-        errorMessage = null
+        keyboardController?.hide() // Hide keyboard when fetch starts
+        isFetchingImage = true
+        fetchErrorMessage = null
         imageUrl = null // Clear previous results
 
         coroutineScope.launch {
             try {
-                val response = RetrofitInstance.api.getRandomPhoto() // Call the API
+                // Use null if the search query is blank after trimming
+                val queryToSend = searchQuery.trim().ifBlank { null }
+
+                val response = RetrofitInstance.api.getRandomPhoto(
+                    orientation = "portrait",
+                    query = queryToSend        // Pass the potentially null query
+                ) // Call the API
                 if (response.isSuccessful && response.body() != null) {
                     // Use 'regular' URL, fallback to 'full' or 'small' if needed
                     val fetchedUrl = response.body()?.urls?.full
@@ -162,21 +183,21 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
                         ?: response.body()?.urls?.small
                     imageUrl = fetchedUrl // Update state on success
                     if (fetchedUrl == null) {
-                        errorMessage = "No suitable image URL found in response."
+                        fetchErrorMessage = "No suitable image URL found in response."
                     }
                 } else {
                     // Handle API errors (e.g., rate limit, invalid key)
-                    errorMessage = "API Error: ${response.code()} - ${response.message()}"
+                    fetchErrorMessage = "API Error: ${response.code()} - ${response.message()}"
                     println("API Error Body: ${response.errorBody()?.string()}") // Log error body
                 }
             } catch (e: IOException) {
                 // Handle network errors (no connection)
-                errorMessage = "Network Error: ${e.message}"
+                fetchErrorMessage = "Network Error: ${e.message}"
             } catch (e: Exception) {
                 // Handle other potential errors (JSON parsing, etc.)
-                errorMessage = "Error: ${e.message}"
+                fetchErrorMessage = "Error: ${e.message}"
             } finally {
-                isLoading = false // Ensure loading stops
+                isFetchingImage = false // Ensure loading stops
             }
         }
     }
@@ -234,6 +255,64 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
             }
         }
     }
+    // --- Step Counter State & Setup ---
+    val sensorManager = remember {
+        context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
+    }
+    val stepCounterSensor: Sensor? = remember(sensorManager) {
+        sensorManager?.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
+    }
+    val sensorAvailable = stepCounterSensor != null
+
+    // State to hold the raw steps read from the sensor (steps since last reboot)
+    var rawStepsSinceReboot by remember { mutableStateOf<Long?>(null) }
+
+    // --- Sensor Event Listener ---
+    val sensorEventListener = remember {
+        object : SensorEventListener {
+            override fun onSensorChanged(event: SensorEvent?) {
+                if (event?.sensor?.type == Sensor.TYPE_STEP_COUNTER) {
+                    val steps = event.values[0].toLong()
+                    rawStepsSinceReboot = steps
+                    // Log.d("StepCounter", "Raw steps since reboot: $steps")
+                    // LATER: Here we'll calculate daily steps based on a stored baseline
+                }
+            }
+
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
+                // You might log accuracy changes if needed, but often not critical for step counter
+                println("Step counter accuracy changed: $accuracy")
+            }
+        }
+    }
+
+    // --- Register/Unregister Listener ---
+    DisposableEffect(sensorManager, stepCounterSensor, sensorAvailable) {
+        if (sensorManager == null || stepCounterSensor == null || !sensorAvailable) {
+            // No sensor manager or sensor available, do nothing
+            println("StepCounter: Sensor Manager or Step Counter Sensor not available for registration.")
+        } else {
+            // Register the listener
+            val registered = sensorManager.registerListener(
+                sensorEventListener,
+                stepCounterSensor,
+                SensorManager.SENSOR_DELAY_NORMAL // Or adjust sampling rate if needed
+            )
+            if (registered) {
+                println("StepCounter: Listener registered successfully.")
+            } else {
+                println("StepCounter: ERROR - Failed to register listener.")
+            }
+        }
+
+        // Cleanup function: Will be called when the Composable leaves the composition
+        onDispose {
+            if (sensorManager != null && stepCounterSensor != null) {
+                sensorManager.unregisterListener(sensorEventListener)
+                println("StepCounter: Listener unregistered.")
+            }
+        }
+    }
 
     // --- UI using Scaffold for Snackbar ---
     Scaffold(
@@ -243,7 +322,8 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues) // Apply padding from Scaffold
-                .padding(16.dp), // Add your own padding
+                .padding(16.dp) // Add your own padding
+                .verticalScroll(rememberScrollState()), // Make column scrollable
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Top
         ) {
@@ -267,14 +347,32 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
             // --- Image Fetch Section ---
             Text("1. Fetch Image:", style = MaterialTheme.typography.titleMedium)
             Spacer(modifier = Modifier.height(8.dp))
-            Button(onClick = ::fetchRandomImage, enabled = !isLoading) {
-                Text("Fetch Random Image")
+
+            // Add the TextField for the query
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                label = { Text("Image Query (Optional)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(
+                    imeAction = ImeAction.Search // Show search icon on keyboard
+                ),
+                keyboardActions = KeyboardActions(
+                    onSearch = {
+                        fetchRandomImage() // Trigger fetch on keyboard search action
+                    }
+                )
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Button(onClick = ::fetchRandomImage, enabled = !isFetchingImage) {
+                Text("Fetch Image")
             }
             Spacer(modifier = Modifier.height(8.dp))
-            if (isLoading) {
+            if (isFetchingImage) {
                 CircularProgressIndicator()
-            } else if (errorMessage != null) {
-                Text("Fetch Error: $errorMessage", color = MaterialTheme.colorScheme.error)
+            } else if (fetchErrorMessage != null) {
+                Text("Fetch Error: $fetchErrorMessage", color = MaterialTheme.colorScheme.error)
             } else if (imageUrl != null) {
                 Text("Fetched URL:", style = MaterialTheme.typography.bodySmall)
                 Text(
@@ -284,7 +382,10 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
                     overflow = TextOverflow.Ellipsis
                 )
             } else {
-                Text("Click button to fetch image.")
+                // Show only if not loading and no error
+                if(!isFetchingImage && fetchErrorMessage == null) {
+                    Text("Enter a query (optional) and click fetch.")
+                }
             }
 
             Divider(modifier = Modifier.padding(vertical = 16.dp))
@@ -295,7 +396,7 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
             Button(
                 onClick = { imageUrl?.let { setWallpaperFromUrl(it) } },
                 // Enable only if URL exists AND not currently fetching OR setting
-                enabled = imageUrl != null && !isLoading && !isSettingWallpaper
+                enabled = imageUrl != null && !isFetchingImage && !isSettingWallpaper
             ) {
                 Text("Set Fetched Image as Wallpaper")
             }
@@ -304,12 +405,34 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
                 CircularProgressIndicator()
             }
 
-            // Removed direct message display here as Snackbar handles it
-            // else if (wallpaperSetMessage != null) {
-            //    Text(wallpaperSetMessage!!, color = if(wallpaperSetMessage!!.startsWith("Failed")) MaterialTheme.colorScheme.error else Color(0xFF4CAF50) )
-            //}
+            // --- Step Counter Section ---
+            Text("3. Step Counter:", style = MaterialTheme.typography.titleMedium)
+            Spacer(modifier = Modifier.height(8.dp))
 
-            // ...(Rest of the Column)...
+            if (sensorAvailable) {
+                Text(
+                    "Sensor Status: Available",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color(0xFF4CAF50) // Green
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "Raw Steps (since last reboot): ${rawStepsSinceReboot ?: "Waiting..."}",
+                    style = MaterialTheme.typography.bodyLarge
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "(Note: This value resets on device reboot. Daily calculation comes later.)",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            } else {
+                Text(
+                    "Sensor Status: Step Counter Sensor NOT available on this device.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+            Spacer(modifier = Modifier.height(16.dp)) // Add space at the bottom
         }
     } // End Scaffold
 
