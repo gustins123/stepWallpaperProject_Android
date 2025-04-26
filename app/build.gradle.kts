@@ -104,4 +104,7 @@ dependencies {
 
     // Coil for image loading in Compose
     implementation("io.coil-kt:coil-compose:2.6.0") // Use the latest version of Coil
+
+    // Jetpack Preferences DataStore
+    implementation("androidx.datastore:datastore-preferences:1.1.1") // Use the latest version
 }

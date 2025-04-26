@@ -70,6 +70,9 @@ import androidx.compose.foundation.Image // Import Image composable
 import androidx.compose.foundation.border
 import androidx.core.graphics.drawable.toBitmap // To convert drawable to bitmap
 import com.example.stepwallpaperprojectfinal.image.ImageProcessor // Import your processor
+import androidx.compose.runtime.collectAsState // Import collectAsState
+import androidx.compose.runtime.getValue // To use delegate with collectAsState
+import com.example.stepwallpaperprojectfinal.data.UserPreferencesRepository // Import repository
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -110,6 +113,10 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
     val coroutineScope = rememberCoroutineScope() // Scope for launching coroutines
     val lifecycleOwner = LocalLifecycleOwner.current // For observing lifecycle state
     val keyboardController = LocalSoftwareKeyboardController.current // Get keyboard controller
+
+    // --- Instantiate Repository ---
+    // Create repository instance (could use dependency injection later)
+    val prefsRepository = remember { UserPreferencesRepository(context.applicationContext) }
 
     // --- Permissions Handling ---
     // Define permissions needed at runtime based on Android version
@@ -322,6 +329,15 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
             }
         }
     }
+
+    // --- Collect Preferences State ---
+    // Observe the flows from the repository and convert them to State for Compose
+    val storedImageUrl by prefsRepository.imageUrlFlow.collectAsState(initial = null)
+    val storedTimestamp by prefsRepository.lastFetchTimestampFlow.collectAsState(initial = null)
+    val storedDailySteps by prefsRepository.dailyStepsFlow.collectAsState(initial = 0L)
+    val storedStepBaseline by prefsRepository.stepBaselineFlow.collectAsState(initial = null)
+
+
     // --- Image Processor Test State ---
     var sliderProgress by remember { mutableStateOf(0.5f) } // Initial progress for slider
     val fixedSeedForTesting = 0L // Use a constant seed for consistent testing
@@ -523,6 +539,51 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
                 }
             }
 
+
+            Spacer(modifier = Modifier.height(16.dp)) // Add space at the bottom
+
+            // --- Persistence Test Section ---
+            Text("5. Persistence Test (DataStore):", style = MaterialTheme.typography.titleMedium)
+            Spacer(modifier = Modifier.height(8.dp))
+            Text("Stored Values:", style = MaterialTheme.typography.titleSmall)
+            Text("- Image URL: ${storedImageUrl ?: "Not set"}")
+            Text("- Last Fetch TS: ${storedTimestamp ?: "Not set"}")
+            Text("- Daily Steps: $storedDailySteps")
+            Text("- Step Baseline: ${storedStepBaseline ?: "Not set"}")
+
+            Spacer(modifier = Modifier.height(8.dp))
+            Text("Test Actions:", style = MaterialTheme.typography.titleSmall)
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = {
+                    coroutineScope.launch {
+                        val testUrl = "https://example.com/test_image_${System.currentTimeMillis()}.jpg"
+                        prefsRepository.saveImageUrl(testUrl)
+                        println("Persistence Test: Saved URL - $testUrl")
+                    }
+                }) { Text("Save Test URL") }
+
+                Button(onClick = {
+                    val currentSteps = rawStepsSinceReboot // Get current raw steps from sensor state
+                    coroutineScope.launch {
+                        prefsRepository.saveDailySteps(storedDailySteps + 100L) // Increment dummy steps
+                        if(currentSteps != null) {
+                            prefsRepository.saveStepBaseline(currentSteps - storedDailySteps.toFloat()) // Example baseline save
+                            println("Persistence Test: Saved Daily Steps & Baseline")
+                        } else {
+                            println("Persistence Test: Cannot save baseline, raw steps null")
+                        }
+                    }
+                }) { Text("Save Steps (+100)") }
+            }
+            Button(onClick = {
+                coroutineScope.launch {
+                    val ts = System.currentTimeMillis()
+                    val baseline = rawStepsSinceReboot ?: 500f // Use current raw or dummy
+                    prefsRepository.startNewDay("https://new.day/image.jpg", ts, baseline.toFloat())
+                    println("Persistence Test: Saved New Day data")
+                }
+            }) { Text("Test 'Start New Day'") }
 
             Spacer(modifier = Modifier.height(16.dp)) // Add space at the bottom
         }
