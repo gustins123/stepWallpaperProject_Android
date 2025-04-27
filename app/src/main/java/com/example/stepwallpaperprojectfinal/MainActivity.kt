@@ -73,6 +73,10 @@ import com.example.stepwallpaperprojectfinal.image.ImageProcessor // Import your
 import androidx.compose.runtime.collectAsState // Import collectAsState
 import androidx.compose.runtime.getValue // To use delegate with collectAsState
 import com.example.stepwallpaperprojectfinal.data.UserPreferencesRepository // Import repository
+import androidx.work.* // Import WorkManager classes
+import com.example.stepwallpaperprojectfinal.workers.DailyImageFetchWorker
+import com.example.stepwallpaperprojectfinal.workers.StepCheckAndUpdateWorker
+import java.util.concurrent.TimeUnit // Import TimeUnit for intervals
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -379,6 +383,11 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
             revealedBitmapState.value = null // Clear if source is null
         }
     }
+    // --- Schedule Background Work ---
+    // LaunchedEffect with Unit ensures this runs once when the composable is first launched
+    LaunchedEffect(Unit) {
+        scheduleWorkers(context)
+    }
 
     // --- UI using Scaffold for Snackbar ---
     Scaffold(
@@ -590,6 +599,7 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
     } // End Scaffold
 
 
+
     // --- Dialog for Permanently Denied Permissions (from Chapter 1) ---
     if (showGoToSettingsDialog) {
         AlertDialog(
@@ -615,4 +625,60 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
             }
         )
     }
+}
+// --- Function to Schedule Workers --- (Place outside the Composable)
+private fun scheduleWorkers(context: Context) {
+    val workManager = WorkManager.getInstance(context)
+
+    // --- Daily Image Fetch Worker ---
+    val dailyConstraints = Constraints.Builder()
+        .setRequiredNetworkType(NetworkType.CONNECTED) // Need network for API call
+        .build()
+
+    val dailyWorkRequest = PeriodicWorkRequestBuilder<DailyImageFetchWorker>(
+        repeatInterval = 24, // Repeat interval
+        repeatIntervalTimeUnit = TimeUnit.HOURS // Interval unit
+        // Flex interval could be added: e.g., ,1, TimeUnit.HOURS -> runs sometime in the last hour of the interval
+    )
+        .setConstraints(dailyConstraints)
+        // Optional: Add backoff policy for retries
+        // .setBackoffCriteria(BackoffPolicy.LINEAR, PeriodicWorkRequest.MIN_BACKOFF_MILLIS, TimeUnit.MILLISECONDS)
+        // Optional: Set initial delay if needed
+        // .setInitialDelay(10, TimeUnit.MINUTES)
+        .build()
+
+    // Enqueue uniquely - KEEP ensures if work already exists, it's not replaced
+    workManager.enqueueUniquePeriodicWork(
+        "dailyImageFetch", // Unique name for this work
+        ExistingPeriodicWorkPolicy.KEEP, // Or .REPLACE if you want to update the request
+        dailyWorkRequest
+    )
+    println("WorkScheduler: DailyImageFetchWorker enqueued (Interval: 24 hours).")
+
+
+    // --- Periodic Step Check & Wallpaper Update Worker ---
+    val stepCheckConstraints = Constraints.Builder()
+        // Add constraints if needed, e.g., battery not low
+        .setRequiresBatteryNotLow(true)
+        .build()
+
+    val stepCheckWorkRequest = PeriodicWorkRequestBuilder<StepCheckAndUpdateWorker>(
+        // NOTE: Minimum interval is 15 minutes for PeriodicWorkRequest
+        repeatInterval = 15, // Repeat interval (adjust as needed, 15-30 mins is reasonable)
+        repeatIntervalTimeUnit = TimeUnit.MINUTES
+    )
+        .setConstraints(stepCheckConstraints)
+        .build()
+
+    workManager.enqueueUniquePeriodicWork(
+        "stepWallpaperUpdate", // Unique name
+        ExistingPeriodicWorkPolicy.KEEP,
+        stepCheckWorkRequest
+    )
+    println("WorkScheduler: StepCheckAndUpdateWorker enqueued (Interval: 15 minutes).")
+
+    // Optional: Observe worker status (more advanced, can be done via LiveData/Flow)
+    // val dailyWorkInfo = workManager.getWorkInfosForUniqueWorkLiveData("dailyImageFetch")
+    // val stepWorkInfo = workManager.getWorkInfosForUniqueWorkLiveData("stepWallpaperUpdate")
+    // Observe these LiveData objects if needed
 }

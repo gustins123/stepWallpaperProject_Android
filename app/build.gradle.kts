@@ -107,4 +107,7 @@ dependencies {
 
     // Jetpack Preferences DataStore
     implementation("androidx.datastore:datastore-preferences:1.1.1") // Use the latest version
+
+    // WorkManager for background tasks
+    implementation("androidx.work:work-runtime-ktx:2.9.0") // Use the latest stable version
 }
