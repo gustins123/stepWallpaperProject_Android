@@ -17,4 +17,7 @@ object PrefKeys {
     // Key for storing the raw step counter value at the beginning of the current day (or last fetch)
     // Using Float as TYPE_STEP_COUNTER returns Float, avoids potential casting issues later
     val STEP_BASELINE_AT_FETCH = floatPreferencesKey("step_baseline_at_fetch")
+
+    // latest known raw step count
+    val LATEST_RAW_STEP_COUNT = floatPreferencesKey("latest_raw_step_count")
 }

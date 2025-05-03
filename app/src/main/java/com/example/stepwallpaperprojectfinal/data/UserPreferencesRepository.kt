@@ -47,6 +47,17 @@ class UserPreferencesRepository(context: Context) {
             preferences[PrefKeys.STEP_BASELINE_AT_FETCH] // Returns null if key doesn't exist
         }
 
+    // Flow for reading the latest raw count
+    val latestRawStepsFlow: Flow<Float?> = dataStore.data
+        .catch { exception -> // Handle errors reading preferences
+            if (exception is IOException) {
+                emit(emptyPreferences()) // Emit empty on IO error
+            } else {
+                throw exception // Rethrow other errors
+            }
+        }.map { preferences ->
+            preferences[PrefKeys.LATEST_RAW_STEP_COUNT] // Returns null if key doesn't exist
+        }
 
     // --- Write Operations (Suspending Functions) ---
 
@@ -78,6 +89,16 @@ class UserPreferencesRepository(context: Context) {
                 preferences.remove(PrefKeys.STEP_BASELINE_AT_FETCH)
             } else {
                 preferences[PrefKeys.STEP_BASELINE_AT_FETCH] = baseline
+            }
+        }
+    }
+    // Function for saving the latest raw count (will be called by StepCheckAndUpdateWorker later)
+    suspend fun saveLatestRawSteps(steps: Float?) {
+        dataStore.edit { preferences ->
+            if (steps == null) {
+                preferences.remove(PrefKeys.LATEST_RAW_STEP_COUNT)
+            } else {
+                preferences[PrefKeys.LATEST_RAW_STEP_COUNT] = steps
             }
         }
     }
