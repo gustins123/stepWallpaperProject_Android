@@ -6,6 +6,18 @@ import androidx.work.WorkerParameters
 import com.example.stepwallpaperprojectfinal.data.UserPreferencesRepository // Need preferences
 import com.example.stepwallpaperprojectfinal.image.ImageProcessor // Need processor
 import kotlinx.coroutines.delay // For simulating work
+import android.app.WallpaperManager
+import android.graphics.Bitmap
+import android.graphics.drawable.BitmapDrawable
+import androidx.core.graphics.drawable.toBitmap
+import coil.ImageLoader
+import coil.request.ImageRequest
+import coil.request.SuccessResult
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.withContext
+import java.io.IOException
+import kotlin.math.max
 
 
 class StepCheckAndUpdateWorker(
@@ -13,30 +25,184 @@ class StepCheckAndUpdateWorker(
     workerParams: WorkerParameters
 ) : CoroutineWorker(appContext, workerParams) {
 
+    companion object {
+        const val TARGET_STEPS = 10000f // Daily step goal as float for progress calculation
+        const val SIGNIFICANT_STEP_DIFF = 50 // Update wallpaper only if steps change by this much
+        const val PROGRESS_CHANGE_THRESHOLD = 0.005 // Or update if progress % changes by 0.5%
+        const val KEY_FORCE_UPDATE = "force_update" // Key for input data
+    }
+
     override suspend fun doWork(): Result {
         val appContext = applicationContext
+        val prefsRepository = UserPreferencesRepository(appContext)
         println("StepCheckAndUpdateWorker: Starting work...")
 
-        // --- !!! TODO: Implement actual logic in Chapter 9 !!! ---
-        // 1. Instantiate UserPreferencesRepository, ImageProcessor, etc.
-        // 2. Read sensor value OR rely on frequent updates saving to DataStore.
-        // 3. Read baseline & daily steps from DataStore.
-        // 4. Calculate current daily steps & progress (handle reboots).
-        // 5. If significant change OR first run:
-        //    - Read image URL from DataStore.
-        //    - Load original bitmap (using Coil/other).
-        //    - Generate revealed bitmap using ImageProcessor.
-        //    - Set wallpaper using WallpaperManager.
-        //    - Save updated daily steps to DataStore.
-        // 6. Handle errors.
+        // --- Read Input Data ---
+        val forceUpdate = inputData.getBoolean(KEY_FORCE_UPDATE, false) // Default to false
+        if (forceUpdate) {
+            println("StepCheckAndUpdateWorker: Force update requested via input data.")
+        }
 
-        // Simulate work for now
-        delay(3000) // Simulate checking steps & potentially updating wallpaper
+        try {
+            // --- 1. Read necessary data from DataStore ---
+            // Use firstOrNull to get the current value non-blockingly within the coroutine
+            val storedImageUrl = prefsRepository.imageUrlFlow.firstOrNull()
+            val storedTimestamp = prefsRepository.lastFetchTimestampFlow.firstOrNull() ?: 0L // Seed for processor
+            val storedDailySteps = prefsRepository.dailyStepsFlow.firstOrNull() ?: 0L // Last calculated daily steps
+            val storedBaseline = prefsRepository.stepBaselineFlow.firstOrNull() // Raw value when day started
+            val latestRawSteps = prefsRepository.latestRawStepsFlow.firstOrNull() // Most recent raw value
 
-        // --- End of TODO ---
 
-        println("StepCheckAndUpdateWorker: Work finished (simulation).")
+            if (storedImageUrl == null) {
+                println("StepCheckAndUpdateWorker: No image URL stored. Skipping wallpaper update.")
+                // If no image, no point calculating steps for reveal? Maybe still save calculated steps?
+                // Let's skip entirely for now. Daily worker should provide URL.
+                return Result.success()
+            }
+
+            if (latestRawSteps == null || storedBaseline == null) {
+                println("StepCheckAndUpdateWorker: Missing step data (baseline or latest raw). Cannot calculate progress accurately.")
+                // Should we still try to save 0 daily steps? Or wait for baseline?
+                // Let's save 0 daily steps if baseline isn't set, indicating day just started maybe.
+                if (storedBaseline == null && storedDailySteps != 0L) {
+                    prefsRepository.saveDailySteps(0L) // Reset if baseline is missing
+                }
+                return Result.success() // Or retry if we expect data soon? Success is safer.
+            }
+
+
+            // --- 2. Calculate Current Daily Steps & Progress ---
+            // Simple approach: steps = max(0, current_raw - baseline_at_start)
+            val calculatedDailySteps = max(0f, latestRawSteps - storedBaseline).toLong()
+            val currentProgress = (calculatedDailySteps / TARGET_STEPS).coerceIn(0.0f, 1.0f)
+            val previousProgress = (storedDailySteps / TARGET_STEPS).coerceIn(0.0f, 1.0f)
+
+            println("StepCheckAndUpdateWorker: RawSteps=$latestRawSteps, Baseline=$storedBaseline, CalcDaily=$calculatedDailySteps (PrevSaved=$storedDailySteps), Progress=$currentProgress")
+
+
+            // --- 3. Check if Update is Needed ---
+            val stepDifference = kotlin.math.abs(calculatedDailySteps - storedDailySteps)
+            val progressDifference = kotlin.math.abs(currentProgress - previousProgress)
+            // Check if calculated steps are now effectively zero AND different from before this run started
+            val justResetToZero = calculatedDailySteps < SIGNIFICANT_STEP_DIFF && calculatedDailySteps != storedDailySteps
+
+            // Update if: force flag is set OR step/progress change is significant OR steps just reset to zero/low
+            val shouldUpdate = forceUpdate ||
+                    stepDifference >= SIGNIFICANT_STEP_DIFF ||
+                    progressDifference >= PROGRESS_CHANGE_THRESHOLD ||
+                    justResetToZero
+
+            // Only update if steps changed significantly OR progress crossed a threshold
+            if (shouldUpdate) {
+                // Add forceUpdate status to the log for clarity
+                println("StepCheckAndUpdateWorker: Update condition met (force=$forceUpdate, stepDiff=$stepDifference, progDiff=$progressDifference, justReset=$justResetToZero). Updating wallpaper.")
+
+                // --- 4. Load Original Bitmap ---
+                val originalBitmap = loadBitmapFromUrl(appContext, storedImageUrl)
+                if (originalBitmap == null) {
+                    println("StepCheckAndUpdateWorker: Failed to load original bitmap from URL. Retrying.")
+                    return Result.retry()
+                }
+
+                // --- 5. Generate Revealed Bitmap ---
+                val revealedBitmap = ImageProcessor.generateRevealedBitmap(
+                    originalBitmap,
+                    currentProgress,
+                    storedTimestamp // Use timestamp as seed
+                )
+
+                // Recycle original bitmap after use if possible (check ImageProcessor doesn't hold reference)
+                // originalBitmap.recycle() // Be cautious with recycling if bitmap is cached by Coil/etc.
+
+                if (revealedBitmap == null) {
+                    println("StepCheckAndUpdateWorker: Failed to generate revealed bitmap. Retrying?")
+                    // Maybe fail permanently if processor fails consistently?
+                    return Result.failure() // Or retry? Failure might be better here.
+                }
+
+                // --- 6. Set Wallpaper ---
+                val success = setWallpaper(appContext, revealedBitmap)
+
+                // Recycle revealed bitmap after setting it
+                revealedBitmap.recycle()
+
+                if (!success) {
+                    println("StepCheckAndUpdateWorker: Failed to set wallpaper. Retrying?")
+                    // Might be permission issue (though declared) or system issue.
+                    return Result.failure() // Failure might be appropriate.
+                }
+                println("StepCheckAndUpdateWorker: Wallpaper updated successfully.")
+
+            } else {
+                println("StepCheckAndUpdateWorker: No significant change / force update needed. Skipping wallpaper update.")
+            }
+
+            // --- 7. Save Updated Calculated Daily Steps ---
+            // Always save the latest calculated value, even if wallpaper wasn't updated
+            if (calculatedDailySteps != storedDailySteps) {
+                prefsRepository.saveDailySteps(calculatedDailySteps)
+                println("StepCheckAndUpdateWorker: Saved updated daily steps: $calculatedDailySteps")
+            }
+
+            return Result.success()
+
+        } catch (e: Exception) {
+            println("StepCheckAndUpdateWorker: Error during execution - ${e.message}")
+            e.printStackTrace()
+            return Result.retry() // Retry on unexpected errors
+        }
+
+        println("StepCheckAndUpdateWorker: Work finished.")
         // For now, always return success. Add error handling later.
         return Result.success()
+    }
+
+    // --- Helper Functions ---
+
+    private suspend fun loadBitmapFromUrl(context: Context, imageUrl: String): Bitmap? {
+        return withContext(Dispatchers.IO) { // Ensure network/disk IO is off main thread
+            val imageLoader = ImageLoader(context)
+            val request = ImageRequest.Builder(context)
+                .data(imageUrl)
+                .allowHardware(false) // Need software bitmap for processor/wallpaper
+                .build()
+            try {
+                val result = imageLoader.execute(request)
+                if (result is SuccessResult) {
+                    // Need to convert drawable to bitmap. Ensure it's mutable if needed? Processor creates new one anyway.
+                    result.drawable.toBitmap() // Use extension function
+                } else {
+                    println("Coil load failed: ${(result as? coil.request.ErrorResult)?.throwable?.message}")
+                    null
+                }
+            } catch (e: IOException) {
+                println("Coil load IO Exception: ${e.message}")
+                null
+            }
+            catch (e: Exception) {
+                println("Coil load General Exception: ${e.message}")
+                e.printStackTrace()
+                null
+            }
+        }
+    }
+
+    private suspend fun setWallpaper(context: Context, bitmap: Bitmap): Boolean {
+        return withContext(Dispatchers.IO) { // Wallpaper setting can block
+            try {
+                val wallpaperManager = WallpaperManager.getInstance(context)
+                wallpaperManager.setBitmap(bitmap, null, true, WallpaperManager.FLAG_SYSTEM)
+                wallpaperManager.setBitmap(bitmap, null, true, WallpaperManager.FLAG_LOCK)
+                true
+            } catch (e: SecurityException) {
+                println("SetWallpaper Error: Permission denied? ${e.message}")
+                e.printStackTrace()
+                false
+            } catch (e: Exception) {
+                println("SetWallpaper Error: ${e.message}")
+                e.printStackTrace()
+                false
+            }
+        }
     }
 }

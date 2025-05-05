@@ -292,10 +292,19 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
         object : SensorEventListener {
             override fun onSensorChanged(event: SensorEvent?) {
                 if (event?.sensor?.type == Sensor.TYPE_STEP_COUNTER) {
-                    val steps = event.values[0].toLong()
+                    val currentRawStepsFloat = event.values[0] // Keep as Float for baseline consistency
+                    val steps = currentRawStepsFloat.toLong()
                     rawStepsSinceReboot = steps
-                    // Log.d("StepCounter", "Raw steps since reboot: $steps")
-                    // LATER: Here we'll calculate daily steps based on a stored baseline
+
+                    // Save the latest raw steps to DataStore asynchronously
+                    // Could add debouncing logic here if writes become too frequent
+                    coroutineScope.launch {
+                        // Use applicationContext if repository needs it long-term
+                        prefsRepository.saveLatestRawSteps(currentRawStepsFloat)
+                        // println("StepCounter Listener: Saved latest raw steps - $currentRawStepsFloat")
+                    }
+
+                    // LATER: Calculate daily steps for UI display *here* as well?
                 }
             }
 
@@ -382,11 +391,6 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
             println("ImageProcessorTest: Source bitmap is null, skipping generation.")
             revealedBitmapState.value = null // Clear if source is null
         }
-    }
-    // --- Schedule Background Work ---
-    // LaunchedEffect with Unit ensures this runs once when the composable is first launched
-    LaunchedEffect(Unit) {
-        scheduleWorkers(context)
     }
 
     // --- UI using Scaffold for Snackbar ---
@@ -587,10 +591,28 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
             }
             Button(onClick = {
                 coroutineScope.launch {
-                    val ts = System.currentTimeMillis()
-                    val baseline = rawStepsSinceReboot ?: 500f // Use current raw or dummy
-                    prefsRepository.startNewDay("https://new.day/image.jpg", ts, baseline.toFloat())
-                    println("Persistence Test: Saved New Day data")
+
+                    println("User Action: 'Start New Day Cycle' clicked.")
+                    // 1. Trigger the "New Day" logic immediately via a OneTimeWorkRequest
+                    val immediateDailyRequest = OneTimeWorkRequestBuilder<DailyImageFetchWorker>()
+                        // We don't need to pass data if the worker reads everything itself
+                        .build()
+
+                    WorkManager.getInstance(context).enqueueUniqueWork(
+                        "manualStartNewDay", // Unique name for THIS specific trigger action
+                        ExistingWorkPolicy.REPLACE, // Replace any pending manual trigger, run this one
+                        immediateDailyRequest
+                    )
+                    println("User Action: Enqueued immediate OneTimeWorkRequest for DailyImageFetchWorker.")
+
+                    // 2. Ensure the *Periodic* workers ARE scheduled.
+                    // The scheduleWorkers function uses KEEP policy internally,
+                    // so it will only actually schedule them if they aren't already
+                    // active from a previous button press.
+                    scheduleWorkers(context) // Call the existing scheduling function
+
+                    // Show feedback
+                    wallpaperResultMessage = "New day cycle initiated! Fetching image..." // Update snackbar state
                 }
             }) { Text("Test 'Start New Day'") }
 
@@ -678,7 +700,7 @@ private fun scheduleWorkers(context: Context) {
     println("WorkScheduler: StepCheckAndUpdateWorker enqueued (Interval: 15 minutes).")
 
     // Optional: Observe worker status (more advanced, can be done via LiveData/Flow)
-    // val dailyWorkInfo = workManager.getWorkInfosForUniqueWorkLiveData("dailyImageFetch")
-    // val stepWorkInfo = workManager.getWorkInfosForUniqueWorkLiveData("stepWallpaperUpdate")
+    val dailyWorkInfo = workManager.getWorkInfosForUniqueWorkLiveData("dailyImageFetch")
+    val stepWorkInfo = workManager.getWorkInfosForUniqueWorkLiveData("stepWallpaperUpdate")
     // Observe these LiveData objects if needed
 }

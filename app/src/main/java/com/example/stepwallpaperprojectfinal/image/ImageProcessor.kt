@@ -9,8 +9,8 @@ import java.util.Random // For seeding random
 object ImageProcessor {
 
     // --- Configuration ---
-    private const val MASK_WIDTH = 144 // Low resolution width for the mask
-    private const val MASK_HEIGHT = 256// Low resolution height for the mask
+    private const val MASK_WIDTH = 720 // Low resolution width for the mask
+    private const val MASK_HEIGHT = 1280// Low resolution height for the mask
     private const val MASK_PIXEL_COUNT = MASK_WIDTH * MASK_HEIGHT
 
     // --- Cache for shuffled coordinates ---

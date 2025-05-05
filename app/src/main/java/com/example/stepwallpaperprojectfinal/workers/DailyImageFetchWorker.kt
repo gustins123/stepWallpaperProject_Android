@@ -6,6 +6,7 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import androidx.work.workDataOf
 import com.example.stepwallpaperprojectfinal.data.UserPreferencesRepository // Need access to repository
 import com.example.stepwallpaperprojectfinal.network.RetrofitInstance
 import kotlinx.coroutines.delay // For simulating work
@@ -32,13 +33,15 @@ class DailyImageFetchWorker(
             println("DailyImageFetchWorker: New day detected ($now) or first run. Proceeding...")
 
             // --- 2. Fetch New Image ---
-            // TODO: Read saved search query from prefsRepository if that feature is kept & persisted
             val fetchedImageUrl: String? = try {
-                val response = unsplashApiService.getRandomPhoto(orientation = "landscape", query = null /* Use saved query */)
+                val response = unsplashApiService.getRandomPhoto(
+                    orientation = "portrait",
+                    query = null// Pass the potentially null query
+                ) // Call the API
                 if (response.isSuccessful && response.body() != null) {
                     // Use 'regular' URL, fallback if needed
-                    response.body()?.urls?.regular
-                        ?: response.body()?.urls?.full
+                    response.body()?.urls?.full
+                        ?: response.body()?.urls?.regular
                         ?: response.body()?.urls?.small
                 } else {
                     println("DailyImageFetchWorker: API Error ${response.code()} - ${response.message()}")
@@ -55,7 +58,7 @@ class DailyImageFetchWorker(
 
             // --- 3. Handle Fetch Result ---
             if (fetchedImageUrl != null) {
-                println("DailyImageFetchWorker: Successfully fetched new image URL.")
+                println("DailyImageFetchWorker: Successfully fetched new image URL. - $fetchedImageUrl")
 
                 // --- 4. Get Step Baseline ---
                 // Read the *last known raw value* saved by the periodic step checker
@@ -100,7 +103,10 @@ class DailyImageFetchWorker(
 
     private fun triggerImmediateStepCheck(context: Context) {
         val workManager = WorkManager.getInstance(context)
+        // Create input data map: Set our key to true
+        val inputData = workDataOf(StepCheckAndUpdateWorker.KEY_FORCE_UPDATE to true)
         val updateRequest = OneTimeWorkRequestBuilder<StepCheckAndUpdateWorker>()
+            .setInputData(inputData)
             // Add constraints if needed (e.g., battery not low) matching the periodic one?
             .build()
         workManager.enqueueUniqueWork(
