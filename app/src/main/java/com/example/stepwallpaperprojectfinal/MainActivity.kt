@@ -593,9 +593,14 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
                 coroutineScope.launch {
 
                     println("User Action: 'Start New Day Cycle' clicked.")
+
+                    // --- Create input data to signal a forced reset ---
+                    val inputDataForWorker = workDataOf(
+                        DailyImageFetchWorker.KEY_FORCE_RESET_SAME_DAY to true
+                    )
                     // 1. Trigger the "New Day" logic immediately via a OneTimeWorkRequest
                     val immediateDailyRequest = OneTimeWorkRequestBuilder<DailyImageFetchWorker>()
-                        // We don't need to pass data if the worker reads everything itself
+                        .setInputData(inputDataForWorker) // <-- Pass the input data
                         .build()
 
                     WorkManager.getInstance(context).enqueueUniqueWork(

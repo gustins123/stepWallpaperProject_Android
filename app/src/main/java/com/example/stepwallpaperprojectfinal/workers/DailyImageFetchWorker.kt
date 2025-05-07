@@ -19,18 +19,34 @@ class DailyImageFetchWorker(
     workerParams: WorkerParameters
 ) : CoroutineWorker(appContext, workerParams) {
 
+    companion object {
+        // Key for input data to force a reset even if it's the same calendar day
+        const val KEY_FORCE_RESET_SAME_DAY = "force_reset_same_day"
+    }
+
     override suspend fun doWork(): Result {
         val appContext = applicationContext // Get context for repository
         val prefsRepository = UserPreferencesRepository(appContext)
         val unsplashApiService = RetrofitInstance.api // Get API service
+
+        // --- Read input data flag ---
+        val forceResetSameDay = inputData.getBoolean(KEY_FORCE_RESET_SAME_DAY, false)
+
+        if (forceResetSameDay) {
+            println("DailyImageFetchWorker: Force reset requested (e.g., by button).")
+        }
         println("DailyImageFetchWorker: Starting work...")
 
         // --- 1. Check if a new day has started ---
         val lastFetchTimestamp = prefsRepository.lastFetchTimestampFlow.firstOrNull()
         val now = System.currentTimeMillis()
 
-        if (lastFetchTimestamp == null || !isSameCalendarDay(lastFetchTimestamp, now)) {
-            println("DailyImageFetchWorker: New day detected ($now) or first run. Proceeding...")
+        if (forceResetSameDay || lastFetchTimestamp == null || !isSameCalendarDay(lastFetchTimestamp, now)) {
+            if (!forceResetSameDay && lastFetchTimestamp != null) { // Log only if it's a natural new day
+                println("DailyImageFetchWorker: New calendar day detected ($now, last fetch: $lastFetchTimestamp). Proceeding...")
+            } else if (lastFetchTimestamp == null && !forceResetSameDay) {
+                println("DailyImageFetchWorker: First run detected. Proceeding...")
+            }
 
             // --- 2. Fetch New Image ---
             val fetchedImageUrl: String? = try {

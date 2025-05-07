@@ -18,6 +18,10 @@ import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import kotlin.math.max
+import java.util.Calendar // For isSameCalendarDay helper
+import androidx.work.OneTimeWorkRequestBuilder // For triggering Daily worker
+import androidx.work.ExistingWorkPolicy // For unique one-time work
+import androidx.work.WorkManager
 
 
 class StepCheckAndUpdateWorker(
@@ -26,16 +30,51 @@ class StepCheckAndUpdateWorker(
 ) : CoroutineWorker(appContext, workerParams) {
 
     companion object {
-        const val TARGET_STEPS = 10000f // Daily step goal as float for progress calculation
+        const val TARGET_STEPS = 8000f // Daily step goal as float for progress calculation
         const val SIGNIFICANT_STEP_DIFF = 50 // Update wallpaper only if steps change by this much
         const val PROGRESS_CHANGE_THRESHOLD = 0.005 // Or update if progress % changes by 0.5%
         const val KEY_FORCE_UPDATE = "force_update" // Key for input data
+    }
+
+    // Helper function for calendar day check (can be moved to a utility object)
+    private fun isSameCalendarDay(millis1: Long, millis2: Long): Boolean {
+        val cal1 = Calendar.getInstance().apply { timeInMillis = millis1 }
+        val cal2 = Calendar.getInstance().apply { timeInMillis = millis2 }
+        return cal1.get(Calendar.YEAR) == cal2.get(Calendar.YEAR) &&
+                cal1.get(Calendar.DAY_OF_YEAR) == cal2.get(Calendar.DAY_OF_YEAR)
+    }
+
+    // Helper for calculating daily steps
+    private fun calculateDailySteps(latestRawSteps: Float?, storedBaseline: Float?): Long {
+        if (latestRawSteps == null || storedBaseline == null) return 0L
+        return max(0f, latestRawSteps - storedBaseline).toLong()
     }
 
     override suspend fun doWork(): Result {
         val appContext = applicationContext
         val prefsRepository = UserPreferencesRepository(appContext)
         println("StepCheckAndUpdateWorker: Starting work...")
+
+        // --- 1. NEW: Check for New Calendar Day ---
+        val lastFetchTimestamp = prefsRepository.lastFetchTimestampFlow.firstOrNull()
+        val now = System.currentTimeMillis()
+
+        if (lastFetchTimestamp != null && !isSameCalendarDay(lastFetchTimestamp, now)) {
+            println("StepCheckAndUpdateWorker: New calendar day detected (current: $now, last fetch: $lastFetchTimestamp).")
+            println("StepCheckAndUpdateWorker: Triggering DailyImageFetchWorker for new day setup.")
+
+            val dailyFetchRequest = OneTimeWorkRequestBuilder<DailyImageFetchWorker>()
+                // No specific input data needed here for DailyImageFetchWorker, it re-evaluates date itself
+                .build()
+            WorkManager.getInstance(appContext).enqueueUniqueWork(
+                "newDayTriggeredDailyFetch", // Unique name for this specific one-time trigger
+                ExistingWorkPolicy.REPLACE,  // If one is already pending from this trigger, replace it
+                dailyFetchRequest
+            )
+            // This worker instance has done its job by delegating new day tasks.
+            return Result.success()
+        }
+        // --- END NEW ---
 
         // --- Read Input Data ---
         val forceUpdate = inputData.getBoolean(KEY_FORCE_UPDATE, false) // Default to false
@@ -48,6 +87,7 @@ class StepCheckAndUpdateWorker(
             // Use firstOrNull to get the current value non-blockingly within the coroutine
             val storedImageUrl = prefsRepository.imageUrlFlow.firstOrNull()
             val storedTimestamp = prefsRepository.lastFetchTimestampFlow.firstOrNull() ?: 0L // Seed for processor
+            val currentImageTimestamp = prefsRepository.lastFetchTimestampFlow.firstOrNull() ?: now  // Get the timestamp for the *current* image for the ImageProcessor seed
             val storedDailySteps = prefsRepository.dailyStepsFlow.firstOrNull() ?: 0L // Last calculated daily steps
             val storedBaseline = prefsRepository.stepBaselineFlow.firstOrNull() // Raw value when day started
             val latestRawSteps = prefsRepository.latestRawStepsFlow.firstOrNull() // Most recent raw value
@@ -73,7 +113,7 @@ class StepCheckAndUpdateWorker(
 
             // --- 2. Calculate Current Daily Steps & Progress ---
             // Simple approach: steps = max(0, current_raw - baseline_at_start)
-            val calculatedDailySteps = max(0f, latestRawSteps - storedBaseline).toLong()
+            val calculatedDailySteps = calculateDailySteps(latestRawSteps, storedBaseline)
             val currentProgress = (calculatedDailySteps / TARGET_STEPS).coerceIn(0.0f, 1.0f)
             val previousProgress = (storedDailySteps / TARGET_STEPS).coerceIn(0.0f, 1.0f)
 
@@ -108,8 +148,9 @@ class StepCheckAndUpdateWorker(
                 val revealedBitmap = ImageProcessor.generateRevealedBitmap(
                     originalBitmap,
                     currentProgress,
-                    storedTimestamp // Use timestamp as seed
+                    currentImageTimestamp // Use the timestamp of the current image as seed
                 )
+                originalBitmap.recycle() // Recycle after processor is done with it
 
                 // Recycle original bitmap after use if possible (check ImageProcessor doesn't hold reference)
                 // originalBitmap.recycle() // Be cautious with recycling if bitmap is cached by Coil/etc.
