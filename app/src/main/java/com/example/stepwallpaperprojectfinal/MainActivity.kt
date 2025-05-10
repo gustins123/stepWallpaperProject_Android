@@ -76,6 +76,7 @@ import com.example.stepwallpaperprojectfinal.data.UserPreferencesRepository // I
 import androidx.work.* // Import WorkManager classes
 import com.example.stepwallpaperprojectfinal.workers.DailyImageFetchWorker
 import com.example.stepwallpaperprojectfinal.workers.StepCheckAndUpdateWorker
+import kotlinx.coroutines.flow.firstOrNull
 import java.util.concurrent.TimeUnit // Import TimeUnit for intervals
 
 class MainActivity : ComponentActivity() {
@@ -390,6 +391,37 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
         } else {
             println("ImageProcessorTest: Source bitmap is null, skipping generation.")
             revealedBitmapState.value = null // Clear if source is null
+        }
+    }
+    // --- Proactive Checks on App Resume ---
+    LaunchedEffect(lifecycleOwner, prefsRepository) {
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            println("App Resumed: Performing checks...")
+            val lastFetchTimestamp = prefsRepository.lastFetchTimestampFlow.firstOrNull()
+            val now = System.currentTimeMillis()
+
+            if (lastFetchTimestamp != null) {
+                // --- It's the SAME CALENDAR DAY ---
+                println("App Resumed: Same day as last fetch. Triggering a StepCheckAndUpdateWorker.")
+
+                // Enqueue StepCheckAndUpdateWorker directly.
+                // No need for forceUpdate=true here; let its normal "significant change" logic run.
+                val immediateStepCheckRequest = OneTimeWorkRequestBuilder<StepCheckAndUpdateWorker>()
+                    // No inputData (so forceUpdate will be false by default)
+                    .build()
+
+                WorkManager.getInstance(context).enqueueUniqueWork(
+                    "appResumeStepCheck", // Unique name for this one-time request
+                    ExistingWorkPolicy.REPLACE, // If app is rapidly resumed, run the latest check
+                    immediateStepCheckRequest
+                )
+                println("App Resumed: Enqueued StepCheckAndUpdateWorker for same-day refresh.")
+            }
+
+            // Ensure periodic workers are also scheduled if this is the first time app interaction
+            // triggers this logic path (e.g., if the main button wasn't pressed yet).
+            // scheduleWorkers uses KEEP policy, so it's safe to call.
+            scheduleWorkers(context)
         }
     }
 
