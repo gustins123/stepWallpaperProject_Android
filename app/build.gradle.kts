@@ -7,12 +7,12 @@ plugins {
 
 android {
     namespace = "com.example.stepwallpaperprojectfinal"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.example.stepwallpaperprojectfinal"
         minSdk = 29
-        targetSdk = 33
+        targetSdk = 34
         versionCode = 1
         versionName = "1.0"
 
@@ -110,4 +110,7 @@ dependencies {
 
     // WorkManager for background tasks
     implementation("androidx.work:work-runtime-ktx:2.9.0") // Use the latest stable version
+
+    // Health Connect Client
+    implementation("androidx.health.connect:connect-client:1.1.0-rc01") // Check for the latest stable or suitable alpha/beta version
 }

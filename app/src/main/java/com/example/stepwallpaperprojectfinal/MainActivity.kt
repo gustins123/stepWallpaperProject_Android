@@ -34,6 +34,7 @@ import com.example.stepwallpaperprojectfinal.network.RetrofitInstance // Import 
 import kotlinx.coroutines.launch // Import coroutine launch builder
 import java.io.IOException // For exception handling
 import android.app.WallpaperManager
+import android.content.ActivityNotFoundException
 import android.graphics.Bitmap
 import android.graphics.drawable.BitmapDrawable
 import android.widget.Toast // Simple feedback for now, Snackbar is better
@@ -78,6 +79,10 @@ import com.example.stepwallpaperprojectfinal.workers.DailyImageFetchWorker
 import com.example.stepwallpaperprojectfinal.workers.StepCheckAndUpdateWorker
 import kotlinx.coroutines.flow.firstOrNull
 import java.util.concurrent.TimeUnit // Import TimeUnit for intervals
+import androidx.activity.compose.rememberLauncherForActivityResult // For permission launcher
+import androidx.health.connect.client.HealthConnectClient // For status constants
+import androidx.health.connect.client.PermissionController
+import com.example.stepwallpaperprojectfinal.health.HealthConnectManager // Import your manager
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -122,6 +127,43 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
     // --- Instantiate Repository ---
     // Create repository instance (could use dependency injection later)
     val prefsRepository = remember { UserPreferencesRepository(context.applicationContext) }
+    val healthConnectManager = remember { HealthConnectManager(context) }
+
+    // --- Health Connect State ---
+    var hcSdkStatus by remember { mutableStateOf(HealthConnectClient.SDK_UNAVAILABLE) }
+    var hcPermissionsGranted by remember { mutableStateOf(false) }
+    var hcPermissionCheckDone by remember { mutableStateOf(false) }
+
+    // --- Permission Launcher for Health Connect ---
+    val requestHcPermissionsLauncher = rememberLauncherForActivityResult(
+        // Use the contract from your HealthConnectManager
+        // Provide a fallback for preview or if client is null during composition
+        contract = healthConnectManager.healthConnectClient?.let { healthConnectManager.requestPermissionsActivityContract() }
+            ?: PermissionController.createRequestPermissionResultContract(), // Default fallback
+        onResult = { grantedPermissions ->
+            // This callback gives a Set<String> of the permissions that were granted by the user
+            coroutineScope.launch {
+                hcPermissionsGranted = healthConnectManager.hasAllPermissions() // Re-check all needed
+                hcPermissionCheckDone = true // Mark check as done
+                if (hcPermissionsGranted) {
+                    println("Health Connect: All required permissions GRANTED.")
+                } else {
+                    println("Health Connect: Some or all permissions DENIED. Granted: $grantedPermissions")
+                    // You might want to show a message explaining why they are needed if denied
+                }
+            }
+        }
+    )
+
+    // --- Initial Checks and Effects ---
+    // Check Health Connect SDK status and permissions on launch or when client becomes available
+    LaunchedEffect(healthConnectManager.healthConnectClient) {
+        hcSdkStatus = healthConnectManager.getSdkStatus()
+        if (hcSdkStatus == HealthConnectClient.SDK_AVAILABLE) {
+            hcPermissionsGranted = healthConnectManager.hasAllPermissions()
+        }
+        hcPermissionCheckDone = true // Initial status check done
+    }
 
     // --- Permissions Handling ---
     // Define permissions needed at runtime based on Android version
@@ -302,6 +344,7 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
                     coroutineScope.launch {
                         // Use applicationContext if repository needs it long-term
                         prefsRepository.saveLatestRawSteps(currentRawStepsFloat)
+                        println("MainActivitySensorUpdate: SAVED latestRawSteps to DataStore - $currentRawStepsFloat (Timestamp: ${System.currentTimeMillis()})")
                         // println("StepCounter Listener: Saved latest raw steps - $currentRawStepsFloat")
                     }
 
@@ -452,6 +495,59 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
                 }
             }
             // ...(Permission explanations)...
+
+            Divider(modifier = Modifier.padding(vertical = 16.dp))
+
+            // --- Health Connect Section ---
+            Text("Health Connect Status:", style = MaterialTheme.typography.titleMedium)
+            Spacer(modifier = Modifier.height(8.dp))
+
+            if (!hcPermissionCheckDone && hcSdkStatus == HealthConnectClient.SDK_AVAILABLE) {
+                // Show loading while initial permission check is in progress
+                CircularProgressIndicator()
+                Text("Checking Health Connect permissions...")
+            } else {
+                when (hcSdkStatus) {
+                    HealthConnectClient.SDK_AVAILABLE -> {
+                        Text("Health Connect: Available", color = Color(0xFF4CAF50))
+                        Spacer(modifier = Modifier.height(4.dp))
+                        if (hcPermissionsGranted) {
+                            Text("Steps Permission: Granted!", color = Color(0xFF4CAF50))
+                        } else {
+                            Text("Steps Permission: Not Granted.", color = MaterialTheme.colorScheme.error)
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Button(onClick = {
+                                // Launch the Health Connect permission flow
+                                requestHcPermissionsLauncher.launch(healthConnectManager.permissions)
+                            }) {
+                                Text("Grant Health Connect Steps Permission")
+                            }
+                        }
+                    }
+                    HealthConnectClient.SDK_UNAVAILABLE_PROVIDER_UPDATE_REQUIRED -> {
+                        Text("Health Connect: Needs to be installed or updated.", color = Color.Blue)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(onClick = {
+                            try {
+                                context.startActivity(healthConnectManager.getInstallHealthConnectIntent())
+                            } catch (e: ActivityNotFoundException) {
+                                println("Error: Play Store or Health Connect install URI not handled. ${e.message}")
+                                // Show a message to the user, e.g., using Snackbar
+                                coroutineScope.launch {
+                                    snackbarHostState.showSnackbar("Could not open Play Store. Please install/update Health Connect manually.")
+                                }
+                            }
+                        }) { Text("Install/Update Health Connect") }
+                    }
+                    HealthConnectClient.SDK_UNAVAILABLE -> {
+                        Text("Health Connect: Not available on this device.", color = MaterialTheme.colorScheme.error)
+                        Text("This app requires Health Connect to track steps for the wallpaper.", style = MaterialTheme.typography.bodySmall)
+                    }
+                    else -> {
+                        Text("Health Connect: Status Unknown (${hcSdkStatus})", color = Color.Gray)
+                    }
+                }
+            }
 
             Divider(modifier = Modifier.padding(vertical = 16.dp))
 
