@@ -13,6 +13,7 @@ import androidx.health.connect.client.records.StepsRecord
 class HealthConnectManager(private val context: Context) {
 
     val healthConnectClient: HealthConnectClient? by lazy {
+
             try {
                 HealthConnectClient.getOrCreate(context.applicationContext)
             } catch (e: Exception) {

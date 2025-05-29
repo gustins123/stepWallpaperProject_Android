@@ -124,6 +124,44 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
     val lifecycleOwner = LocalLifecycleOwner.current // For observing lifecycle state
     val keyboardController = LocalSoftwareKeyboardController.current // Get keyboard controller
 
+    // --- Permissions Handling ---
+    // Define permissions needed at runtime based on Android version
+    val runtimePermissions = remember {
+        mutableListOf<String>().apply {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                add(Manifest.permission.ACTIVITY_RECOGNITION)
+            }
+            // Add POST_NOTIFICATIONS here if you plan to use them on API 33+
+            // if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            //     add(Manifest.permission.POST_NOTIFICATIONS)
+            // }
+        }.toTypedArray() // Convert to Array for the launcher
+    }
+
+    // State to track if runtime permissions are granted
+    var permissionsGrantedState by remember {
+        mutableStateOf(checkAllPermissions(context, runtimePermissions))
+    }
+    // State to track if user has denied permanently (used to guide to settings)
+    var showGoToSettingsDialog by remember { mutableStateOf(false) }
+
+    // Prepare the permission request launcher
+    val permissionsLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions(),
+        onResult = { permissionsResultMap ->
+            permissionsGrantedState = permissionsResultMap.values.all { it }
+            if (!permissionsGrantedState) {
+                // Check if any permission was permanently denied
+                val permanentlyDenied = permissionsResultMap.any { (permission, granted) ->
+                    !granted && !context.findActivity()?.shouldShowRequestPermissionRationale(permission)!!
+                }
+                if (permanentlyDenied && runtimePermissions.isNotEmpty()) { // Check if not empty before showing dialog
+                    showGoToSettingsDialog = true
+                }
+            }
+        }
+    )
+
     // --- Instantiate Repository ---
     // Create repository instance (could use dependency injection later)
     val prefsRepository = remember { UserPreferencesRepository(context.applicationContext) }
@@ -164,44 +202,6 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
         }
         hcPermissionCheckDone = true // Initial status check done
     }
-
-    // --- Permissions Handling ---
-    // Define permissions needed at runtime based on Android version
-    val runtimePermissions = remember {
-        mutableListOf<String>().apply {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                add(Manifest.permission.ACTIVITY_RECOGNITION)
-            }
-            // Add POST_NOTIFICATIONS here if you plan to use them on API 33+
-            // if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            //     add(Manifest.permission.POST_NOTIFICATIONS)
-            // }
-        }.toTypedArray() // Convert to Array for the launcher
-    }
-
-    // State to track if runtime permissions are granted
-    var permissionsGrantedState by remember {
-        mutableStateOf(checkAllPermissions(context, runtimePermissions))
-    }
-    // State to track if user has denied permanently (used to guide to settings)
-    var showGoToSettingsDialog by remember { mutableStateOf(false) }
-
-    // Prepare the permission request launcher
-    val permissionsLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestMultiplePermissions(),
-        onResult = { permissionsResultMap ->
-            permissionsGrantedState = permissionsResultMap.values.all { it }
-            if (!permissionsGrantedState) {
-                // Check if any permission was permanently denied
-                val permanentlyDenied = permissionsResultMap.any { (permission, granted) ->
-                    !granted && !context.findActivity()?.shouldShowRequestPermissionRationale(permission)!!
-                }
-                if (permanentlyDenied && runtimePermissions.isNotEmpty()) { // Check if not empty before showing dialog
-                    showGoToSettingsDialog = true
-                }
-            }
-        }
-    )
 
     // --- API Fetching State ---
     var imageUrl by rememberSaveable { mutableStateOf<String?>(null) } // Holds the fetched URL
@@ -517,8 +517,30 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
                             Text("Steps Permission: Not Granted.", color = MaterialTheme.colorScheme.error)
                             Spacer(modifier = Modifier.height(8.dp))
                             Button(onClick = {
-                                // Launch the Health Connect permission flow
-                                requestHcPermissionsLauncher.launch(healthConnectManager.permissions)
+                                val currentSdkStatus = healthConnectManager.getSdkStatus() // Re-check status at click time
+                                val client = healthConnectManager.healthConnectClient // Get client instance
+
+                                println("Health Connect Grant Button: Clicked!")
+                                println("Health Connect Grant Button: Current SDK Status at click: $currentSdkStatus")
+                                println("Health Connect Grant Button: Client instance is null: ${client == null}")
+
+                                if (currentSdkStatus == HealthConnectClient.SDK_AVAILABLE && client != null) {
+                                    try {
+                                        println("Health Connect Grant Button: Attempting to launch permission request for: ${healthConnectManager.permissions}")
+                                        requestHcPermissionsLauncher.launch(healthConnectManager.permissions)
+                                    } catch (e: Exception) {
+                                        println("Health Connect Grant Button: ERROR launching permission request: ${e.message}")
+                                        e.printStackTrace()
+                                        coroutineScope.launch { // Show error to user
+                                            snackbarHostState.showSnackbar("Error launching permission request: ${e.message}")
+                                        }
+                                    }
+                                } else {
+                                    println("Health Connect Grant Button: Cannot launch. SDK not available or client is null.")
+                                    coroutineScope.launch {
+                                        snackbarHostState.showSnackbar("Health Connect not ready. Status: $currentSdkStatus, Client: ${if (client == null) "null" else "exists"}")
+                                    }
+                                }
                             }) {
                                 Text("Grant Health Connect Steps Permission")
                             }
