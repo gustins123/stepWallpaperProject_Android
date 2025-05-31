@@ -468,6 +468,9 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
         }
     }
 
+    // --- New State for Displaying Steps from Health Connect ---
+    var stepsFromHcDisplay by remember { mutableStateOf("Steps from HC: Not read yet.") }
+
     // --- UI using Scaffold for Snackbar ---
     Scaffold(
         snackbarHost = { SnackbarHost(hostState = snackbarHostState) }
@@ -569,6 +572,38 @@ fun mainScreen() { // Renaming to MainScreen or creating a new one might be bett
                         Text("Health Connect: Status Unknown (${hcSdkStatus})", color = Color.Gray)
                     }
                 }
+            }
+
+            if (hcSdkStatus == HealthConnectClient.SDK_AVAILABLE && hcPermissionsGranted) {
+                Divider(modifier = Modifier.padding(vertical = 16.dp))
+                Text("Health Connect Data Reading:", style = MaterialTheme.typography.titleMedium)
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Button(
+                    onClick = {
+                        coroutineScope.launch {
+                            // Re-check permissions just in case, though UI enables based on hcPermissionsGranted
+                            if (healthConnectManager.hasAllPermissions()) {
+                                stepsFromHcDisplay = "Reading steps from HC..."
+                                val steps = healthConnectManager.getStepsToday()
+                                stepsFromHcDisplay = if (steps != null) {
+                                    "Steps today (HC): $steps"
+                                } else {
+                                    "Failed to read steps from HC. Check logs."
+                                }
+                            } else {
+                                stepsFromHcDisplay = "HC Read Steps permission not granted."
+                                snackbarHostState.showSnackbar("Please grant Health Connect steps permission first.")
+                            }
+                        }
+                    }
+                    // Enable button only if HC is available and permissions are granted.
+                    // hcPermissionsGranted state should already reflect this.
+                ) {
+                    Text("Read Today's Steps (HC)")
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(stepsFromHcDisplay, style = MaterialTheme.typography.bodyMedium)
             }
 
             Divider(modifier = Modifier.padding(vertical = 16.dp))

@@ -9,6 +9,12 @@ import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.PermissionController
 import androidx.health.connect.client.permission.HealthPermission
 import androidx.health.connect.client.records.StepsRecord
+import androidx.health.connect.client.request.ReadRecordsRequest
+import androidx.health.connect.client.time.TimeRangeFilter
+import java.time.Instant // For current time
+import java.time.ZoneId // For device's timezone
+import java.time.ZonedDateTime
+import java.time.temporal.ChronoUnit // For truncating to start of day
 
 class HealthConnectManager(private val context: Context) {
 
@@ -63,5 +69,59 @@ class HealthConnectManager(private val context: Context) {
      */
     suspend fun hasAllPermissions(): Boolean {
         return healthConnectClient?.permissionController?.getGrantedPermissions()?.containsAll(permissions) == true
+    }
+
+    /**
+     * Reads the total steps taken today from Health Connect.
+     * Returns the total step count, or null if an error occurs or permissions are missing.
+     */
+    suspend fun getStepsToday(): Long? {
+        if (healthConnectClient == null) {
+            println("HealthConnectManager: Client is null, cannot read steps.")
+            return null
+        }
+        if (!hasAllPermissions()) {
+            println("HealthConnectManager: Read Steps permission not granted, cannot read steps.")
+            return null
+        }
+
+        try {
+            // Define the time range: from the start of today until now
+            val zoneId = ZoneId.systemDefault() // Use the device's current timezone
+            val startOfToday = ZonedDateTime.now(zoneId).truncatedTo(ChronoUnit.DAYS).toInstant()
+            val now = Instant.now()
+
+            // Ensure 'now' is after 'startOfToday' to prevent issues if clocks are weird or testing around midnight
+            if (now.isBefore(startOfToday)) {
+                println("HealthConnectManager: Current time is before start of today, returning 0 steps.")
+                return 0L // Or handle as an error/edge case
+            }
+
+            val timeRangeFilter = TimeRangeFilter.between(startOfToday, now)
+
+            val request = ReadRecordsRequest(
+                recordType = StepsRecord::class,
+                timeRangeFilter = timeRangeFilter
+                // You can add dataOriginFilter here if you only want steps from specific apps,
+                // but usually, you want all aggregated steps.
+            )
+
+            val response = healthConnectClient!!.readRecords(request) // Client checked for null above
+            var totalSteps = 0L
+            for (record in response.records) {
+                totalSteps += record.count
+            }
+            println("HealthConnectManager: Read ${response.records.size} step records. Total steps today: $totalSteps (from $startOfToday to $now)")
+            return totalSteps
+        } catch (e: SecurityException) {
+            // This can happen if permissions were revoked after checking but before reading.
+            println("HealthConnectManager: SecurityException reading steps - Likely permissions revoked: ${e.message}")
+            e.printStackTrace()
+        } catch (e: Exception) {
+            // Other errors like API issues, dead client, etc.
+            println("HealthConnectManager: Error reading steps: ${e.message}")
+            e.printStackTrace()
+        }
+        return null // Return null on any error
     }
 }
