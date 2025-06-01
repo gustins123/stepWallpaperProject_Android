@@ -22,6 +22,7 @@ import java.util.Calendar // For isSameCalendarDay helper
 import androidx.work.OneTimeWorkRequestBuilder // For triggering Daily worker
 import androidx.work.ExistingWorkPolicy // For unique one-time work
 import androidx.work.WorkManager
+import com.example.stepwallpaperprojectfinal.health.HealthConnectManager
 
 
 class StepCheckAndUpdateWorker(
@@ -36,45 +37,29 @@ class StepCheckAndUpdateWorker(
         const val KEY_FORCE_UPDATE = "force_update" // Key for input data
     }
 
-    // Helper function for calendar day check (can be moved to a utility object)
-    private fun isSameCalendarDay(millis1: Long, millis2: Long): Boolean {
-        val cal1 = Calendar.getInstance().apply { timeInMillis = millis1 }
-        val cal2 = Calendar.getInstance().apply { timeInMillis = millis2 }
-        return cal1.get(Calendar.YEAR) == cal2.get(Calendar.YEAR) &&
-                cal1.get(Calendar.DAY_OF_YEAR) == cal2.get(Calendar.DAY_OF_YEAR)
-    }
-
-    // Helper for calculating daily steps
-    private fun calculateDailySteps(latestRawSteps: Float?, storedBaseline: Float?): Long {
-        if (latestRawSteps == null || storedBaseline == null) return 0L
-        return max(0f, latestRawSteps - storedBaseline).toLong()
-    }
-
     override suspend fun doWork(): Result {
         val appContext = applicationContext
         val prefsRepository = UserPreferencesRepository(appContext)
-        println("StepCheckAndUpdateWorker: Starting work...")
+        val healthConnectManager = HealthConnectManager(appContext) // Instantiate HC Manager
 
-        // --- 1. NEW: Check for New Calendar Day ---
+        println("StepCheckAndUpdateWorker: Starting work (with Health Connect)...")
+
+        // --- 1. Check for New Calendar Day ---
         val lastFetchTimestamp = prefsRepository.lastFetchTimestampFlow.firstOrNull()
         val now = System.currentTimeMillis()
 
         if (lastFetchTimestamp != null && !isSameCalendarDay(lastFetchTimestamp, now)) {
-            println("StepCheckAndUpdateWorker: New calendar day detected (current: $now, last fetch: $lastFetchTimestamp).")
-            println("StepCheckAndUpdateWorker: Triggering DailyImageFetchWorker for new day setup.")
-
-            val dailyFetchRequest = OneTimeWorkRequestBuilder<DailyImageFetchWorker>()
-                // No specific input data needed here for DailyImageFetchWorker, it re-evaluates date itself
-                .build()
+            println("StepCheckAndUpdateWorker: New calendar day detected. Triggering DailyImageFetchWorker.")
+            // ... (logic to enqueue DailyImageFetchWorker - KEEP THIS) ...
+            val dailyFetchRequest = OneTimeWorkRequestBuilder<DailyImageFetchWorker>().build()
             WorkManager.getInstance(appContext).enqueueUniqueWork(
-                "newDayTriggeredDailyFetch", // Unique name for this specific one-time trigger
-                ExistingWorkPolicy.REPLACE,  // If one is already pending from this trigger, replace it
+                "newDayTriggeredDailyFetch",
+                ExistingWorkPolicy.REPLACE,
                 dailyFetchRequest
             )
-            // This worker instance has done its job by delegating new day tasks.
             return Result.success()
         }
-        // --- END NEW ---
+        // --- END NEW DAY CHECK ---
 
         // --- Read Input Data ---
         val forceUpdate = inputData.getBoolean(KEY_FORCE_UPDATE, false) // Default to false
@@ -83,106 +68,86 @@ class StepCheckAndUpdateWorker(
         }
 
         try {
-            // --- 1. Read necessary data from DataStore ---
-            // Use firstOrNull to get the current value non-blockingly within the coroutine
+            // --- 2. Read essential data from DataStore & Health Connect ---
             val storedImageUrl = prefsRepository.imageUrlFlow.firstOrNull()
-            val storedTimestamp = prefsRepository.lastFetchTimestampFlow.firstOrNull() ?: 0L // Seed for processor
-            val currentImageTimestamp = prefsRepository.lastFetchTimestampFlow.firstOrNull() ?: now  // Get the timestamp for the *current* image for the ImageProcessor seed
-            val storedDailySteps = prefsRepository.dailyStepsFlow.firstOrNull() ?: 0L // Last calculated daily steps
-            val storedBaseline = prefsRepository.stepBaselineFlow.firstOrNull() // Raw value when day started
-            val latestRawSteps = prefsRepository.latestRawStepsFlow.firstOrNull() // Most recent raw value
+            // This timestamp is for the ImageProcessor seed, representing when the current image was fetched
+            val currentImageTimestamp = prefsRepository.lastFetchTimestampFlow.firstOrNull() ?: now
 
+            // Read the step count this worker saved last time (for comparison)
+            val previouslySavedDailySteps = prefsRepository.dailyStepsFlow.firstOrNull() ?: 0L
 
             if (storedImageUrl == null) {
-                println("StepCheckAndUpdateWorker: No image URL stored. Skipping wallpaper update.")
-                // If no image, no point calculating steps for reveal? Maybe still save calculated steps?
-                // Let's skip entirely for now. Daily worker should provide URL.
+                println("StepCheckAndUpdateWorker: No image URL stored. Skipping.")
                 return Result.success()
             }
 
-            if (latestRawSteps == null || storedBaseline == null) {
-                println("StepCheckAndUpdateWorker: Missing step data (baseline or latest raw). Cannot calculate progress accurately.")
-                // Should we still try to save 0 daily steps? Or wait for baseline?
-                // Let's save 0 daily steps if baseline isn't set, indicating day just started maybe.
-                if (storedBaseline == null && storedDailySteps != 0L) {
-                    prefsRepository.saveDailySteps(0L) // Reset if baseline is missing
-                }
-                return Result.success() // Or retry if we expect data soon? Success is safer.
+            // --- Get current steps for today from Health Connect ---
+            val stepsFromHealthConnect = healthConnectManager.getStepsToday()
+
+            if (stepsFromHealthConnect == null) {
+                // This could be due to permissions revoked, HC error, or HC not installed/available.
+                // The getStepsToday() function logs details.
+                println("StepCheckAndUpdateWorker: Failed to get steps from Health Connect. Retrying later.")
+                return Result.retry() // Retry as HC might become available or permissions granted
             }
 
-
-            // --- 2. Calculate Current Daily Steps & Progress ---
-            // Simple approach: steps = max(0, current_raw - baseline_at_start)
-            val calculatedDailySteps = calculateDailySteps(latestRawSteps, storedBaseline)
+            val calculatedDailySteps = stepsFromHealthConnect // This is our new source of truth for current daily steps
             val currentProgress = (calculatedDailySteps / TARGET_STEPS).coerceIn(0.0f, 1.0f)
-            val previousProgress = (storedDailySteps / TARGET_STEPS).coerceIn(0.0f, 1.0f)
+            // For progress difference, compare against previously saved HC steps
+            val previousProgress = (previouslySavedDailySteps / TARGET_STEPS).coerceIn(0.0f, 1.0f)
 
-            println("StepCheckAndUpdateWorker: RawSteps=$latestRawSteps, Baseline=$storedBaseline, CalcDaily=$calculatedDailySteps (PrevSaved=$storedDailySteps), Progress=$currentProgress")
-
+            println("StepCheckAndUpdateWorker: Steps from HC=$calculatedDailySteps (Previously saved in DataStore=$previouslySavedDailySteps), Progress=$currentProgress")
 
             // --- 3. Check if Update is Needed ---
-            val stepDifference = kotlin.math.abs(calculatedDailySteps - storedDailySteps)
+            val stepDifference = kotlin.math.abs(calculatedDailySteps - previouslySavedDailySteps)
             val progressDifference = kotlin.math.abs(currentProgress - previousProgress)
-            // Check if calculated steps are now effectively zero AND different from before this run started
-            val justResetToZero = calculatedDailySteps < SIGNIFICANT_STEP_DIFF && calculatedDailySteps != storedDailySteps
+            // If steps are very low, and different from what we last saved, it's likely a reset or start of day
+            val justResetToLow = calculatedDailySteps < SIGNIFICANT_STEP_DIFF && calculatedDailySteps != previouslySavedDailySteps
 
-            // Update if: force flag is set OR step/progress change is significant OR steps just reset to zero/low
             val shouldUpdate = forceUpdate ||
                     stepDifference >= SIGNIFICANT_STEP_DIFF ||
                     progressDifference >= PROGRESS_CHANGE_THRESHOLD ||
-                    justResetToZero
+                    justResetToLow
 
-            // Only update if steps changed significantly OR progress crossed a threshold
             if (shouldUpdate) {
-                // Add forceUpdate status to the log for clarity
-                println("StepCheckAndUpdateWorker: Update condition met (force=$forceUpdate, stepDiff=$stepDifference, progDiff=$progressDifference, justReset=$justResetToZero). Updating wallpaper.")
+                println("StepCheckAndUpdateWorker: Update condition met (force=$forceUpdate, stepDiff=$stepDifference, progDiff=$progressDifference, justResetToLow=$justResetToLow). Updating wallpaper.")
 
-                // --- 4. Load Original Bitmap ---
                 val originalBitmap = loadBitmapFromUrl(appContext, storedImageUrl)
                 if (originalBitmap == null) {
-                    println("StepCheckAndUpdateWorker: Failed to load original bitmap from URL. Retrying.")
+                    println("StepCheckAndUpdateWorker: Failed to load original bitmap. Retrying.")
                     return Result.retry()
                 }
 
-                // --- 5. Generate Revealed Bitmap ---
                 val revealedBitmap = ImageProcessor.generateRevealedBitmap(
                     originalBitmap,
                     currentProgress,
-                    currentImageTimestamp // Use the timestamp of the current image as seed
+                    currentImageTimestamp // Seed with the current image's fetch time
                 )
-                originalBitmap.recycle() // Recycle after processor is done with it
-
-                // Recycle original bitmap after use if possible (check ImageProcessor doesn't hold reference)
-                // originalBitmap.recycle() // Be cautious with recycling if bitmap is cached by Coil/etc.
+                originalBitmap.recycle()
 
                 if (revealedBitmap == null) {
-                    println("StepCheckAndUpdateWorker: Failed to generate revealed bitmap. Retrying?")
-                    // Maybe fail permanently if processor fails consistently?
-                    return Result.failure() // Or retry? Failure might be better here.
+                    println("StepCheckAndUpdateWorker: Failed to generate revealed bitmap. Failing.")
+                    return Result.failure()
                 }
 
-                // --- 6. Set Wallpaper ---
                 val success = setWallpaper(appContext, revealedBitmap)
-
-                // Recycle revealed bitmap after setting it
                 revealedBitmap.recycle()
 
                 if (!success) {
-                    println("StepCheckAndUpdateWorker: Failed to set wallpaper. Retrying?")
-                    // Might be permission issue (though declared) or system issue.
-                    return Result.failure() // Failure might be appropriate.
+                    println("StepCheckAndUpdateWorker: Failed to set wallpaper. Failing.")
+                    return Result.failure()
                 }
                 println("StepCheckAndUpdateWorker: Wallpaper updated successfully.")
 
             } else {
-                println("StepCheckAndUpdateWorker: No significant change / force update needed. Skipping wallpaper update.")
+                println("StepCheckAndUpdateWorker: No significant change or force update. Skipping wallpaper update.")
             }
 
-            // --- 7. Save Updated Calculated Daily Steps ---
-            // Always save the latest calculated value, even if wallpaper wasn't updated
-            if (calculatedDailySteps != storedDailySteps) {
+            // --- 4. Save Updated Daily Steps (from Health Connect) to DataStore ---
+            // This is important so the *next* run of this worker can compare for "significant change"
+            if (calculatedDailySteps != previouslySavedDailySteps) {
                 prefsRepository.saveDailySteps(calculatedDailySteps)
-                println("StepCheckAndUpdateWorker: Saved updated daily steps: $calculatedDailySteps")
+                println("StepCheckAndUpdateWorker: Saved daily steps from HC to DataStore: $calculatedDailySteps")
             }
 
             return Result.success()
@@ -190,15 +155,19 @@ class StepCheckAndUpdateWorker(
         } catch (e: Exception) {
             println("StepCheckAndUpdateWorker: Error during execution - ${e.message}")
             e.printStackTrace()
-            return Result.retry() // Retry on unexpected errors
+            return Result.retry()
         }
-
-        println("StepCheckAndUpdateWorker: Work finished.")
-        // For now, always return success. Add error handling later.
-        return Result.success()
     }
 
     // --- Helper Functions ---
+
+    // --- Helper to check calendar day (could be moved to a common utility) ---
+    private fun isSameCalendarDay(millis1: Long, millis2: Long): Boolean {
+        val cal1 = Calendar.getInstance().apply { timeInMillis = millis1 }
+        val cal2 = Calendar.getInstance().apply { timeInMillis = millis2 }
+        return cal1.get(Calendar.YEAR) == cal2.get(Calendar.YEAR) &&
+                cal1.get(Calendar.DAY_OF_YEAR) == cal2.get(Calendar.DAY_OF_YEAR)
+    }
 
     private suspend fun loadBitmapFromUrl(context: Context, imageUrl: String): Bitmap? {
         return withContext(Dispatchers.IO) { // Ensure network/disk IO is off main thread
