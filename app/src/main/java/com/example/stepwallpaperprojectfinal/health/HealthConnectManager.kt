@@ -15,6 +15,7 @@ import java.time.Instant // For current time
 import java.time.ZoneId // For device's timezone
 import java.time.ZonedDateTime
 import java.time.temporal.ChronoUnit // For truncating to start of day
+import kotlin.math.roundToLong
 
 class HealthConnectManager(private val context: Context) {
 
@@ -107,40 +108,55 @@ class HealthConnectManager(private val context: Context) {
             )
 
             val response = healthConnectClient!!.readRecords(request) // Client checked for null above
-            println("HealthConnectManager: ---- Raw Step Records Received (${response.records.size} records) ----")
-            var rawTotalStepsSum = 0L
-            for (record in response.records) {
-                println("  Raw Record: count=${record.count}, start=${record.startTime}, end=${record.endTime}, sourceApp='${record.metadata.dataOrigin.packageName}', device='${record.metadata.device?.manufacturer} ${record.metadata.device?.model}'")
-                rawTotalStepsSum += record.count
+            if (response.records.isEmpty()) {
+                println("HealthConnectManager: No step records found for today.")
+                return 0L
             }
-            println("HealthConnectManager: Sum of all raw record counts: $rawTotalStepsSum")
+
+            println("HealthConnectManager: ---- Raw Step Records Received (${response.records.size} records) ----")
+            for (record in response.records) {
+                println("  Raw Record: count=${record.count}, start=${record.startTime}, end=${record.endTime}, sourceApp='${record.metadata.dataOrigin.packageName}'")
+            }
             println("HealthConnectManager: ---- End of Raw Records ----")
 
-            // --- De-duplication for records with exact same startTime and endTime ---
-            // We'll store the maximum step count found for each unique time slot.
-            val stepsByUniqueTimeSlot = mutableMapOf<Pair<Instant, Instant>, Long>()
+            // --- Step 1 & 2: Group records by data source and sum steps for each ---
+            val stepsPerSource = mutableMapOf<String, Long>() // Key: packageName, Value: total steps for that source
 
             for (record in response.records) {
-                val timeSlotKey = Pair(record.startTime, record.endTime)
-                val currentMaxStepsForSlot = stepsByUniqueTimeSlot[timeSlotKey] ?: 0L // If slot not seen, current max is 0
-
-                // If this record has more steps for the same exact time slot, update it.
-                if (record.count > currentMaxStepsForSlot) {
-                    stepsByUniqueTimeSlot[timeSlotKey] = record.count
-                }
+                val packageName = record.metadata.dataOrigin.packageName
+                // Add current record's count to the existing sum for this source, or initialize if new
+                stepsPerSource[packageName] = (stepsPerSource[packageName] ?: 0L) + record.count
             }
 
-            // Now, sum the steps from our de-duplicated map
-            var deDuplicatedTotalSteps = 0L
-            println("HealthConnectManager: ---- De-duplicated Step Contributions by Time Slot ----")
-            for ((timeSlot, steps) in stepsByUniqueTimeSlot) {
-                println("  Slot [${timeSlot.first} to ${timeSlot.second}]: $steps steps")
-                deDuplicatedTotalSteps += steps
+            if (stepsPerSource.isEmpty()) {
+                // This case should ideally not be reached if response.records was not empty,
+                // but as a safeguard.
+                println("HealthConnectManager: No data sources found after processing records.")
+                return 0L
             }
-            println("HealthConnectManager: ---- End of De-duplicated Contributions ----")
 
-            println("HealthConnectManager: De-duplicated total steps today: $deDuplicatedTotalSteps (from $startOfToday to $now)")
-            return deDuplicatedTotalSteps
+            println("HealthConnectManager: ---- Total Steps Summed Per Data Source ----")
+            var grandTotalOfSourceSums = 0L
+            for ((packageName, sourceTotalSteps) in stepsPerSource) {
+                println("  Source: '$packageName', Total Steps for this source: $sourceTotalSteps")
+                grandTotalOfSourceSums += sourceTotalSteps
+            }
+            println("HealthConnectManager: ---- End of Per Source Sums ----")
+
+            // --- Step 3: Calculate the average of these per-source totals ---
+            val numberOfContributingSources = stepsPerSource.size
+            val averageSteps = if (numberOfContributingSources > 0) {
+                // Calculate average as Double first for precision, then round to Long
+                (grandTotalOfSourceSums.toDouble() / numberOfContributingSources).roundToLong()
+            } else {
+                0L // Should not happen if stepsPerSource wasn't empty
+            }
+
+            println("HealthConnectManager: Grand Total (Sum of source totals): $grandTotalOfSourceSums")
+            println("HealthConnectManager: Number of Contributing Data Sources: $numberOfContributingSources")
+            println("HealthConnectManager: Calculated 'Average of Source Totals' for Today: $averageSteps")
+
+            return averageSteps
         } catch (e: SecurityException) {
             // This can happen if permissions were revoked after checking but before reading.
             println("HealthConnectManager: SecurityException reading steps - Likely permissions revoked: ${e.message}")
